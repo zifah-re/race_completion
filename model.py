@@ -14,6 +14,7 @@ def main(route_df):
     longitude_array = route_df.iloc[:, 4].to_numpy()
     winds_array= route_df.iloc[:,5].to_numpy()
     winddir_array=route_df.iloc[:,6].to_numpy()
+
     N_V = len(route_df) + 1
     # velocity_profile = np.ones(N_V) * state.InitialGuessVelocity
     velocity_profile = np.concatenate([[0], np.ones(N_V-2) * state.InitialGuessVelocity, [0]])
