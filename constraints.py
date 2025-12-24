@@ -1,79 +1,70 @@
 import numpy as np
-
-from config import BatteryCapacity, DeepDischargeCap, MaxVelocity, Mass, MaxCurrent, BusVoltage
+import race_config as config
+from race_config import BatteryCapacity, DeepDischargeCap, MaxVelocity, Mass, MaxCurrent, BusVoltage
 import state
 from car import calculate_dt, calculate_power
 from solar import calculate_incident_solarpower
 
-SafeBatteryLevel = BatteryCapacity * (DeepDischargeCap)
+SafeBatteryLevel = BatteryCapacity * DeepDischargeCap
 MaxPower = MaxCurrent * BusVoltage
 
-# Bounds for the velocity
-def get_bounds(N):
-    return ([(0, 0)] + [(0.01, MaxVelocity)]*(N-2) + [(0, 0)])
+def _trim_arrays(*arrays: np.ndarray) -> list[np.ndarray]:
+    """Trims multiple arrays to the length of the shortest among them."""
+    min_len = min(len(a) for a in arrays)
+    return [a[:min_len] for a in arrays]
 
-def objective(velocity_profile, segment_array):
-    start_speeds = velocity_profile[:-1]
-    stop_speeds = velocity_profile[1:]
+def get_bounds(n_segments: int) -> list[tuple[float, float]]:
+    """Returns velocity bounds for the optimization.
     
-    # Fix for array shape mismatch
-    min_len = min(len(start_speeds), len(segment_array))
-    start_speeds = start_speeds[:min_len]
-    stop_speeds = stop_speeds[:min_len]
-    segment_array = segment_array[:min_len]
+    The car starts and ends at 0 velocity, and stays within MaxVelocity during the race.
+    """
+    return ([(0, 0)] + [(0.01, MaxVelocity)] * (n_segments - 2) + [(0, 0)])
 
-    dt = calculate_dt(start_speeds, stop_speeds, segment_array)
-    return np.sum(dt)
+def objective(velocity_profile: np.ndarray, segment_array: np.ndarray) -> float:
+    """Calculates total race time (the objective to minimize)."""
+    v_start, v_stop, segments = _trim_arrays(velocity_profile[:-1], velocity_profile[1:], segment_array)
+    dt = calculate_dt(v_start, v_stop, segments)
+    return float(np.sum(dt))
 
-def battery_acc_constraint_func(v_prof, segment_array, slope_array, lattitude_array, longitude_array,ws,wd):
-    start_speeds, stop_speeds = v_prof[:-1], v_prof[1:]
+def battery_acc_constraint_func(v_prof: np.ndarray, segment_array: np.ndarray, 
+                                slope_array: np.ndarray, latitude_array: np.ndarray, 
+                                longitude_array: np.ndarray, wind_speed: np.ndarray, 
+                                wind_dir: np.ndarray) -> tuple[float, float]:
+    """Ensures battery doesn't deplete and power doesn't exceed MaxPower."""
+    v_start, v_stop, segments, slopes, lats, longs, ws, wd = _trim_arrays(
+        v_prof[:-1], v_prof[1:], segment_array, slope_array, 
+        latitude_array, longitude_array, wind_speed, wind_dir
+    )
     
-    # Fix for array shape mismatch
-    # print("DEBUG: Trimming arrays in battery_acc_constraint_func")
-    min_len = min(len(start_speeds), len(segment_array))
-    start_speeds = start_speeds[:min_len]
-    stop_speeds = stop_speeds[:min_len]
-    segment_array = segment_array[:min_len]
-    slope_array = slope_array[:min_len]
-    lattitude_array = lattitude_array[:min_len]
-    longitude_array = longitude_array[:min_len]
-    ws = ws[:min_len]
-    wd = wd[:min_len]
-    
-    avg_speed = (start_speeds + stop_speeds) / 2
-    
-    dt = calculate_dt(start_speeds, stop_speeds, segment_array)
-    acceleration = (stop_speeds - start_speeds) / dt
+    avg_speed = (v_start + v_stop) / 2
+    dt = calculate_dt(v_start, v_stop, segments)
+    acceleration = (v_stop - v_start) / dt
 
-    P, PO = calculate_power(avg_speed, acceleration, slope_array,ws,wd)
-    SolP = calculate_incident_solarpower(dt.cumsum() + state.TimeOffset, lattitude_array, longitude_array)
+    net_power, _ = calculate_power(avg_speed, acceleration, slopes, ws, wd)
+    solar_power = calculate_incident_solarpower(dt.cumsum() + state.TimeOffset, lats, longs)
 
-    energy_consumption = ((P - SolP) * dt).cumsum() / 3600
+    energy_consumption = ((net_power - solar_power) * dt).cumsum() / 3600
     battery_profile = state.InitialBatteryCapacity - energy_consumption - SafeBatteryLevel
 
-    return np.min(battery_profile), MaxPower - np.max(P)
+    return float(np.min(battery_profile)), float(MaxPower - np.max(net_power))
 
-def final_battery_constraint_func(v_prof, segment_array, slope_array, lattitude_array, longitude_array,ws,wd):
-    start_speeds, stop_speeds = v_prof[:-1], v_prof[1:]
+def final_battery_constraint_func(v_prof: np.ndarray, segment_array: np.ndarray, 
+                                  slope_array: np.ndarray, latitude_array: np.ndarray, 
+                                  longitude_array: np.ndarray, wind_speed: np.ndarray, 
+                                  wind_dir: np.ndarray) -> tuple[float, float]:
+    """Ensures final battery level meets the strategy target."""
+    v_start, v_stop, segments, slopes, lats, longs, ws, wd = _trim_arrays(
+        v_prof[:-1], v_prof[1:], segment_array, slope_array, 
+        latitude_array, longitude_array, wind_speed, wind_dir
+    )
     
-    # Fix for array shape mismatch
-    min_len = min(len(start_speeds), len(segment_array))
-    start_speeds = start_speeds[:min_len]
-    stop_speeds = stop_speeds[:min_len]
-    segment_array = segment_array[:min_len]
-    slope_array = slope_array[:min_len]
-    lattitude_array = lattitude_array[:min_len]
-    longitude_array = longitude_array[:min_len]
-    ws = ws[:min_len]
-    wd = wd[:min_len]
-    
-    avg_speed = (start_speeds + stop_speeds) / 2
-    dt = calculate_dt(start_speeds, stop_speeds, segment_array)
-    acceleration = (stop_speeds - start_speeds) / dt
+    avg_speed = (v_start + v_stop) / 2
+    dt = calculate_dt(v_start, v_stop, segments)
+    acceleration = (v_stop - v_start) / dt
 
-    P, _= calculate_power(avg_speed, acceleration, slope_array,ws,wd)
-    SolP = calculate_incident_solarpower(dt.cumsum() + state.TimeOffset, lattitude_array, longitude_array)
+    net_power, _ = calculate_power(avg_speed, acceleration, slopes, ws, wd)
+    solar_power = calculate_incident_solarpower(dt.cumsum() + state.TimeOffset, lats, longs)
 
-    energy_consumption = ((P - SolP) * dt).cumsum() / 3600
+    energy_consumption = ((net_power - solar_power) * dt).cumsum() / 3600
     final_battery_lev = state.InitialBatteryCapacity - energy_consumption[-1] - state.FinalBatteryCapacity
-    return final_battery_lev, -final_battery_lev
+    return float(final_battery_lev), float(-final_battery_lev)
